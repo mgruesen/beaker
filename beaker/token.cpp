@@ -5,8 +5,7 @@
 
 
 // TODO: This could be unified with the token so
-// that I'd only ever have to write the spelling
-// once.
+// that I'd only have to write the spelling once.
 char const*
 spelling(Token_kind k)
 {
@@ -38,6 +37,7 @@ spelling(Token_kind k)
     case and_tok: return "&&";
     case or_tok: return "||";
     case not_tok: return "!";
+    case amp_tok: return "&";
     case arrow_tok: return "->";
 
     case bool_kw: return "bool";
@@ -46,10 +46,12 @@ spelling(Token_kind k)
     case continue_kw: return "continue";
     case def_kw: return "def";
     case else_kw: return "else";
+    case foreign_kw: return "else";
     case if_kw: return "if";
     case int_kw: return "int";
     case return_kw: return "return";
     case struct_kw: return "struct";
+    case this_kw: return "this";
     case var_kw: return "var";
     case while_kw: return "while";
 
@@ -90,6 +92,7 @@ init_symbols(Symbol_table& syms)
   syms.put<Symbol>("&&", and_tok);
   syms.put<Symbol>("||", or_tok);
   syms.put<Symbol>("!", not_tok);
+  syms.put<Symbol>("&", amp_tok);
   syms.put<Symbol>("->", arrow_tok);
 
   // Keywords
@@ -99,14 +102,19 @@ init_symbols(Symbol_table& syms)
   syms.put<Symbol>("continue", continue_kw);
   syms.put<Symbol>("def", def_kw);
   syms.put<Symbol>("else", else_kw);
+  syms.put<Symbol>("foreign", foreign_kw);
   syms.put<Symbol>("if", if_kw);
   syms.put<Symbol>("int", int_kw);
   syms.put<Symbol>("while", while_kw);
   syms.put<Symbol>("return", return_kw);
   syms.put<Symbol>("struct", struct_kw);
+  syms.put<Symbol>("this", this_kw);
   syms.put<Symbol>("var", var_kw);
 
   // Reserved names.
   syms.put<Boolean_sym>("true", boolean_tok, true);
   syms.put<Boolean_sym>("false", boolean_tok, false);
+
+  // Common identifiers
+  syms.put<Symbol>("main", identifier_tok);
 }

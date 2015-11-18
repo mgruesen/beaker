@@ -4,9 +4,11 @@
 #ifndef BEAKER_PRELUDE_HPP
 #define BEAKER_PRELUDE_HPP
 
-#include "lingo/error.hpp"
+#include "lingo/assert.hpp"
+#include "lingo/string.hpp"
 #include "lingo/node.hpp"
 #include "lingo/print.hpp"
+#include "lingo/io.hpp"
 
 #include <iosfwd>
 #include <vector>
@@ -14,22 +16,22 @@
 #include <type_traits>
 
 
-// Lingo casting
+// Bring lingo into scope.
+using namespace lingo;
+
+
+// Bring specific functions in as overloads
+// to support argument dependent lookup.
 using lingo::is;
 using lingo::as;
 using lingo::cast;
 
 
-// Lingo node concepts
-using lingo::is_nullary_node;
-using lingo::is_unary_node;
-using lingo::is_binary_node;
-using lingo::is_ternary_node;
-
-
 struct Expr;
 struct Literal_expr;
 struct Id_expr;
+struct Decl_expr;
+struct Overload_expr;
 struct Add_expr;
 struct Sub_expr;
 struct Mul_expr;
@@ -47,12 +49,17 @@ struct And_expr;
 struct Or_expr;
 struct Not_expr;
 struct Call_expr;
-struct Member_expr;
+struct Dot_expr;
+struct Field_expr;
+struct Method_expr;
 struct Index_expr;
+struct Conv;
 struct Value_conv;
 struct Block_conv;
+struct Init;
 struct Default_init;
 struct Copy_init;
+struct Reference_init;
 
 struct Type;
 struct Id_type;
@@ -71,6 +78,7 @@ struct Function_decl;
 struct Parameter_decl;
 struct Record_decl;
 struct Field_decl;
+struct Method_decl;
 struct Module_decl;
 
 struct Stmt;

@@ -2,6 +2,7 @@
 // All rights reserved
 
 #include "evaluator.hpp"
+#include "type.hpp"
 #include "expr.hpp"
 #include "decl.hpp"
 #include "stmt.hpp"
@@ -19,6 +20,7 @@ Evaluator::eval(Expr const* e)
 
     Value operator()(Literal_expr const* e) { return ev.eval(e); }
     Value operator()(Id_expr const* e) { return ev.eval(e); }
+    Value operator()(Decl_expr const* e) { return ev.eval(e); }
     Value operator()(Add_expr const* e) { return ev.eval(e); }
     Value operator()(Sub_expr const* e) { return ev.eval(e); }
     Value operator()(Mul_expr const* e) { return ev.eval(e); }
@@ -36,12 +38,15 @@ Evaluator::eval(Expr const* e)
     Value operator()(Or_expr const* e) { return ev.eval(e); }
     Value operator()(Not_expr const* e) { return ev.eval(e); }
     Value operator()(Call_expr const* e) { return ev.eval(e); }
-    Value operator()(Member_expr const* e) { return ev.eval(e); }
+    Value operator()(Dot_expr const* e) { return ev.eval(e); }
+    Value operator()(Field_expr const* e) { return ev.eval(e); }
+    Value operator()(Method_expr const* e) { return ev.eval(e); }
     Value operator()(Index_expr const* e) { return ev.eval(e); }
     Value operator()(Value_conv const* e) { return ev.eval(e); }
     Value operator()(Block_conv const* e) { return ev.eval(e); }
     Value operator()(Default_init const* e) { return ev.eval(e); }
     Value operator()(Copy_init const* e) { return ev.eval(e); }
+    Value operator()(Reference_init const* e) { return ev.eval(e); }
   };
 
   return apply(e, Fn {*this});
@@ -58,7 +63,14 @@ Evaluator::eval(Literal_expr const* e)
 Value
 Evaluator::eval(Id_expr const* e)
 {
-  return &stack.lookup(e->symbol())->second;
+  lingo_unreachable();
+}
+
+
+Value
+Evaluator::eval(Decl_expr const* e)
+{
+  return &stack.lookup(e->name())->second;
 }
 
 
@@ -290,16 +302,36 @@ Evaluator::eval(Call_expr const* e)
 
 
 Value
-Evaluator::eval(Member_expr const* e)
+Evaluator::eval(Dot_expr const* e)
 {
-  throw std::runtime_error("not implemented");
+  lingo_unreachable();
 }
 
 
 Value
+Evaluator::eval(Field_expr const* e)
+{
+  Value obj = eval(e->container());
+  Value* ref = obj.get_reference();
+  return &ref->get_tuple().data[e->field()->index()];
+}
+
+
+Value
+Evaluator::eval(Method_expr const* e)
+{
+  lingo_unimplemented();
+}
+
+
+// Return a reference to nth element of an array.
+Value
 Evaluator::eval(Index_expr const* e)
 {
-  throw std::runtime_error("not implemnted");
+  Value arr = eval(e->array());
+  Value* ref = arr.get_reference();
+  Value ix = eval(e->index());
+  return &ref->get_array().data[ix.get_integer()];
 }
 
 
@@ -324,17 +356,28 @@ Evaluator::eval(Block_conv const* e)
 }
 
 
+// FIXME: This is wrong. We should be calling a function
+// that default initializes the created object.
 Value
 Evaluator::eval(Default_init const* e)
 {
-  throw std::runtime_error("not implemented");
+  lingo_unimplemented();
+}
+
+
+// FIXME: This should be calling a function that
+// default iniitializes the created object.
+Value
+Evaluator::eval(Copy_init const* e)
+{
+  lingo_unimplemented();
 }
 
 
 Value
-Evaluator::eval(Copy_init const* e)
+Evaluator::eval(Reference_init const* e)
 {
-  throw std::runtime_error("not implemented");
+  lingo_unimplemented();
 }
 
 
@@ -353,6 +396,7 @@ Evaluator::eval(Decl const* d)
     void operator()(Parameter_decl const* d) { ev.eval(d); }
     void operator()(Record_decl const* d) { ev.eval(d); }
     void operator()(Field_decl const* d) { ev.eval(d); }
+    void operator()(Method_decl const* d) { ev.eval(d); }
     void operator()(Module_decl const* d) { ev.eval(d); }
   };
 
@@ -360,11 +404,97 @@ Evaluator::eval(Decl const* d)
 }
 
 
+namespace
+{
+
+// Allocate a value whose shape is determined
+// by the type. No guarantees are made about the
+// contents of the resulting value.
+Value
+get_value(Type const* t)
+{
+  struct Fn
+  {
+    Value operator()(Id_type const*) { lingo_unreachable(); }
+
+    // Produce an integer value.
+    Value operator()(Boolean_type const*) { return 0; }
+    Value operator()(Character_type const*) { return 0; }
+    Value operator()(Integer_type const*) { return 0; }
+
+    // Produce a function value.
+    Value operator()(Function_type const*)
+    {
+      return Function_value(nullptr);
+    }
+
+    // Recursively construct an array whose values are
+    // shaped by the element type.
+    Value operator()(Array_type const* t)
+    {
+      Array_value v(t->size());
+      for (std::size_t i = 0; i < v.len; ++i)
+        v.data[i] = get_value(t->type());
+      return v;
+    }
+
+
+    // FIXME: What kind of value is this?
+    Value operator()(Block_type const*)
+    {
+      throw std::runtime_error("not implemented");
+    }
+
+
+    Value operator()(Reference_type const*)
+    {
+      return Reference_value(nullptr);
+    }
+
+
+    Value operator()(Record_type const* t)
+    {
+      Record_decl const* d = t->declaration();
+      Decl_seq const& f = d->fields();
+      Tuple_value v(f.size());
+      for (std::size_t i = 0; i < v.len; ++i)
+        v.data[i] = get_value(f[i]->type());
+      return v;
+    }
+  };
+  return apply(t, Fn{});
+}
+
+} // namespace
+
+
 void
 Evaluator::eval(Variable_decl const* d)
 {
-  Value v = eval(d->init());
-  stack.top().bind(d->name(), v);
+  // Create an uninitialized object and bind it
+  // to the symbol. Keep a reference so we can
+  // initialize it directly.
+  Value v0 = get_value(d->type());
+  Value& v1 = stack.top().bind(d->name(), v0).second;
+
+  // Handle initialization.
+  //
+  // FIXME: The initializer should hold a function
+  // that can be evalated to perform the initialization
+  // procedure. We shouldn't be doing this explicitly.
+  Expr const* e = d->init();
+
+  // Perform default initialization.
+  if (is<Default_init>(e))
+    zero_init(v1);
+
+  // Perfor copy initialization. We should guarantee
+  // that v1 and the evaluation of i produce values
+  // of the same shape.
+  else if (Copy_init const* i = as<Copy_init>(e))
+    v1 = eval(i->value());
+  else
+    throw std::runtime_error("unhandled initializer");
 }
 
 
@@ -395,6 +525,14 @@ Evaluator::eval(Record_decl const*)
 // There is no evaluation for a field.
 void
 Evaluator::eval(Field_decl const*)
+{
+  return;
+}
+
+
+// There is no evaluation for a method.
+void
+Evaluator::eval(Method_decl const*)
 {
   return;
 }

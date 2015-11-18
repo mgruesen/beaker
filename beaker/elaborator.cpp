@@ -10,73 +10,103 @@
 #include "evaluator.hpp"
 #include "error.hpp"
 
+#include <algorithm>
 #include <iostream>
 
 
 // -------------------------------------------------------------------------- //
-// Lexical scoping
+// Declaration of entities
+
+
+// Determine if d can be overloaded with the existing
+// elements in the set.
+void
+Elaborator::overload(Overload& ovl, Decl* curr)
+{
+  // Check to make sure that curr does not conflict with any
+  // declarations in the current overload set.
+  for (Decl* prev : ovl) {
+    // If the two declarations have the same type, this
+    // is not overloading. It is redefinition.
+    if (prev->type() == curr->type()) {
+      std::stringstream ss;
+      ss << "redefinition of " << *curr->name() << '\n';
+      throw Type_error({}, ss.str());
+    }
+
+    if (!can_overload(prev, curr)) {
+      std::stringstream ss;
+      ss << "cannot overload " << *curr->name() << '\n';
+      throw Type_error({}, ss.str());
+    }
+  }
+
+  ovl.push_back(curr);
+}
 
 
 // Create a declarative binding for d. This also checks
 // that the we are not redefining a symbol in the current
 // scope.
 void
-Scope_stack::declare(Decl* d)
+Elaborator::declare(Decl* d)
 {
-  Scope& scope = current();
-
-  // TODO: If we allow overloading, then this is
-  // where we would handle that.
-  if (scope.lookup(d->name())) {
-    // TODO: Add a note that points to the previous
-    // definition.
-    std::stringstream ss;
-    ss << "redefinition of '" << *d->name() << "'\n";
-    throw Lookup_error({}, ss.str());
-  }
-
-  // Create the binding.
-  scope.bind(d->name(), d);
+  Scope& scope = stack.current();
 
   // Set d's declaration context.
-  d->cxt_ = context();
+  d->cxt_ = stack.context();
+
+  // If we've already seen the name, we should
+  // determine if it can be overloaded.
+  if (Scope::Binding* bind = scope.lookup(d->name()))
+    return overload(bind->second, d);
+
+  // Create a new overload set.
+  Scope::Binding& bind = scope.bind(d->name(), {});
+  Overload& ovl = bind.second;
+  ovl.push_back(d);
 }
 
 
-// Returns the innermost declaration context.
-Decl*
-Scope_stack::context() const
+// When opening the scope of a previously declared
+// entity, simply push the declaration into its
+// overload set.
+void
+Elaborator::redeclare(Decl* d)
 {
-  for (auto iter = rbegin(); iter != rend(); ++iter) {
-    Scope const& s = *iter;
-    if (s.decl)
-      return s.decl;
-  }
-  return nullptr;
+  Scope& scope = stack.current();
+  Overload* ovl;
+  if (Scope::Binding* bind = scope.lookup(d->name()))
+    ovl = &bind->second;
+  else
+    ovl = &scope.bind(d->name(), {}).second;
+  ovl->push_back(d);
 }
 
 
-// Returns the current module. This always the bottom
-// of the stack.
-Module_decl*
-Scope_stack::module() const
+// Perform lookup of an unqualified identifier. This
+// will search enclosing scopes for the innermost
+// binding of the identifier.
+Overload*
+Elaborator::unqualified_lookup(Symbol const* sym)
 {
-  return cast<Module_decl>(bottom().decl);
+  if (Scope::Binding* bind = stack.lookup(sym))
+    return &bind->second;
+  else
+    return nullptr;
 }
 
 
-// Returns the current function. The current function is found
-// by working outwards through the declaration context stack.
-// If there is no current function, this returns nullptr.
-Function_decl*
-Scope_stack::function() const
+// Perform a qualified lookup of a name in the given
+// scope. This searches only that scope for a binding 
+// for the identifier.
+Overload*
+Elaborator::qualified_lookup(Scope* s, Symbol const* sym)
 {
-  for (auto iter = rbegin(); iter != rend(); ++iter) {
-    Scope const& s = *iter;
-    if (Function_decl* fn = as<Function_decl>(s.decl))
-      return fn;
-  }
-  return nullptr;
+  if (Scope::Binding* bind = s->lookup(sym))
+    return &bind->second;
+  else
+    return nullptr;
 }
 
 
@@ -105,26 +135,36 @@ Elaborator::elaborate(Type const* t)
 }
 
 
+// The elaboration of an identifer as a type performs
+// unqualified name lookup. The declaration associated
+// with the name shall be a user-defined type or an
+// alias.
+//
+// TODO: Support type aliases.
 Type const*
 Elaborator::elaborate(Id_type const* t)
 {
-  Scope::Binding const* b = stack.lookup(t->symbol());
-  if (!b) {
-    std::stringstream ss;
-    ss << "no matching declaration for '" << *t->symbol() << '\'';
-    throw Lookup_error(locs.get(t), ss.str());
+  // Perform unqualified lookup.
+  Overload* ovl = unqualified_lookup(t->symbol());
+  if (!ovl) {
+    String msg = format("no matching declaration for '{}'", *t);
+    throw Lookup_error(locate(t), msg);
+  }
+
+  // We can't currently overload types, so this could 
+  // only mean that we found a funtion overload set.
+  if (ovl->size() > 1) {
+    String msg = format("'{}' does not name a type", *t);
+    throw Lookup_error(locate(t), msg);
   }
 
   // Determine if the name is a type declaration.
-  Decl* d = b->second;
-  if (Record_decl* r = as<Record_decl>(d)) {
+  Decl* d = ovl->front();
+  if (Record_decl* r = as<Record_decl>(d))
     return get_record_type(r);
-  }
-  else {
-    std::stringstream ss;
-    ss << '\'' << *t->symbol() << "' does not name a type";
-    throw Lookup_error(locs.get(t), ss.str());
-  }
+
+  String msg = format("'{}' does not name a type", *t);
+  throw Lookup_error(locate(t), msg);
 }
 
 
@@ -212,6 +252,7 @@ Elaborator::elaborate(Expr* e)
 
     Expr* operator()(Literal_expr* e) const { return elab.elaborate(e); }
     Expr* operator()(Id_expr* e) const { return elab.elaborate(e); }
+    Expr* operator()(Decl_expr* e) const { return elab.elaborate(e); }
     Expr* operator()(Add_expr* e) const { return elab.elaborate(e); }
     Expr* operator()(Sub_expr* e) const { return elab.elaborate(e); }
     Expr* operator()(Mul_expr* e) const { return elab.elaborate(e); }
@@ -229,12 +270,15 @@ Elaborator::elaborate(Expr* e)
     Expr* operator()(Or_expr* e) const { return elab.elaborate(e); }
     Expr* operator()(Not_expr* e) const { return elab.elaborate(e); }
     Expr* operator()(Call_expr* e) const { return elab.elaborate(e); }
-    Expr* operator()(Member_expr* e) const { return elab.elaborate(e); }
+    Expr* operator()(Dot_expr* e) const { return elab.elaborate(e); }
+    Expr* operator()(Field_expr* e) const { return elab.elaborate(e); }
+    Expr* operator()(Method_expr* e) const { return elab.elaborate(e); }
     Expr* operator()(Index_expr* e) const { return elab.elaborate(e); }
     Expr* operator()(Value_conv* e) const { return elab.elaborate(e); }
     Expr* operator()(Block_conv* e) const { return elab.elaborate(e); }
     Expr* operator()(Default_init* e) const { return elab.elaborate(e); }
     Expr* operator()(Copy_init* e) const { return elab.elaborate(e); }
+    Expr* operator()(Reference_init* e) const { return elab.elaborate(e); }
   };
 
   return apply(e, Fn{*this});
@@ -250,37 +294,64 @@ Elaborator::elaborate(Literal_expr* e)
 }
 
 
-// Elaborate an id expression. When the identifier refers
-// to an object of type T (a variable or parameter), the
-// type of the expression is T&. Otherwise, the type of the
-// expression is the type of the declaration.
+// The elaboration of an identifier requires performs
+// unqualified name lookup. The associated declaration
+// shall not declare a type.
 //
-// TODO: There may be some contexts in which an unresolved
-// identifier can be useful. Unfortunately, this means that
-// we have to push the handling of lookup errors up one
-// layer, unless we to precisely establish contexts where
-// such identifiers are allowed.
+// If lookup associates a single declaration D, with
+// declared type T, with the name, then the type of 
+// the expression is determined as follows:
+//
+//  - if D is an object, the  type of the expression 
+//    is T&;
+//  - otherwise, then the type is T.
+//
+// Lookup may associate a set of declarations (an
+// overload set). A single declaration is selected
+// by overload resolution (see call expressions).
+//
+// TODO: Allow overload sets of templates?
 Expr*
 Elaborator::elaborate(Id_expr* e)
 {
-  Scope::Binding const* b = stack.lookup(e->symbol());
-  if (!b) {
+  Location loc = locate(e);
+
+  // Lookup the declaration for the identifier.
+  Overload* ovl = unqualified_lookup(e->symbol());
+  if (!ovl) {
     std::stringstream ss;
     ss << "no matching declaration for '" << *e->symbol() << '\'';
     throw Lookup_error(locs.get(e), ss.str());
   }
 
-  // Annotate the expression with its declaration.
-  Decl* d = b->second;
-  e->declaration(d);
+  // We can't resolve an overload without context,
+  // so return the resolved overload set.
+  if (ovl->size() > 1) {
+    Expr* ret = new Overload_expr(ovl);
+    locate(ret, loc);
+    return ret;
+  }
 
-  // If the referenced declaration is a variable of
-  // type T, then the type is T&. Otherwise, it is just T.
+  // Get the declaration named by the symbol.
+  Decl* d = ovl->front();
+
+  // An identifier always refers to an object, so
+  // these expressions have reference type.
   Type const* t = d->type();
-  if (defines_object(d))
+  if (is_object(d))
     t = t->ref();
-  e->type(t);
 
+  // Return a new expression.
+  Expr* ret = new Decl_expr(t, d);
+  locate(ret, loc);
+  return ret;
+}
+
+
+// This deoes not require elaboration.
+Expr*
+Elaborator::elaborate(Decl_expr* e)
+{
   return e;
 }
 
@@ -291,37 +362,24 @@ namespace
 // Used to require the conversion of a reference to a
 // value. Essentially, this unwraps the reference if
 // needed.
-//
-// Note that after completion, the pointer e is modified
-// so that it is the same as the return value.
 Expr*
-require_value(Elaborator& elab, Expr*& e)
+require_value(Elaborator& elab, Expr* e)
 {
-  e = convert_to_value(elab.elaborate(e));
+  e = elab.elaborate(e);
+  e = convert_to_value(e);
   return e;
 }
 
 
 // Used to require the conversion of an expression
-// to a given type.
-//
-// Note that after succesful completion, the pointer
-// e is modified so that it is the same as the return
-// value.
-//
-// This returns nullptr if the convesion fails.
+// to a given type. This returns nullptr if the convesion
+// fails.
 Expr*
-require_converted(Elaborator& elab, Expr*& e, Type const* t)
+require_converted(Elaborator& elab, Expr* e, Type const* t)
 {
-  elab.elaborate(e);
-
-  // Try a conversion. If it succeeds, update
-  // the original expression.
-  Expr* c = convert(e, t);
-  if (c)
-    e = c;
-
-  return c;
+  e = elab.elaborate(e);
+  e = convert(e, t);
+  return e;
 }
 
 
@@ -329,8 +387,9 @@ require_converted(Elaborator& elab, Expr*& e, Type const* t)
 // converted to rvalues. The converted operands shall have
 // type int. The result of an arithmetic expression is an
 // rvalue with type int.
+template<typename T>
 Expr*
-check_binary_arithmetic_expr(Elaborator& elab, Binary_expr* e)
+check_binary_arithmetic_expr(Elaborator& elab, T* e)
 {
   Type const* z = get_integer_type();
   Expr* c1 = require_converted(elab, e->first, z);
@@ -339,7 +398,12 @@ check_binary_arithmetic_expr(Elaborator& elab, Binary_expr* e)
     throw Type_error({}, "left operand cannot be converted to 'int'");
   if (!c2)
     throw Type_error({}, "right operand cannot be converted to 'int'");
-  e->type(z);
+
+  // Rebuild the expression with the
+  // converted operands.
+  e->type_ = z;
+  e->first = c1;
+  e->second = c2;
   return e;
 }
 
@@ -348,15 +412,19 @@ check_binary_arithmetic_expr(Elaborator& elab, Binary_expr* e)
 // converted to rvalues. The converted operands shall
 // have type int. The result of an arithmetic expression
 // is an rvalue of type int.
+template<typename T>
 Expr*
-check_unary_arithmetic_expr(Elaborator& elab, Unary_expr* e)
+check_unary_arithmetic_expr(Elaborator& elab, T* e)
 {
   // Apply conversions
   Type const* z = get_integer_type();
   Expr* c = require_converted(elab, e->first, z);
   if (!c)
     throw Type_error({}, "operand cannot be converted to 'int'");
-  e->type(z);
+
+  // Rebuild the expression with the converted operands.
+  e->type_ = z;
+  e->first = c;
   return e;
 }
 
@@ -421,18 +489,23 @@ namespace
 // to rvalues. The operands shall have the same type. The
 // result of an equality expression is an rvalue of type
 // bool.
+//
+// TODO: Update equality comparison for new types.
 Expr*
 check_equality_expr(Elaborator& elab, Binary_expr* e)
 {
   // Apply conversions.
+  Type const* b = get_boolean_type();
   Expr* e1 = require_value(elab, e->first);
   Expr* e2 = require_value(elab, e->second);
 
   // Check types.
   if (e1->type() != e2->type())
     throw Type_error({}, "operands have different types");
-  e->type(get_boolean_type());
 
+  e->type_ = b;
+  e->first = e1;
+  e->second = e2;
   return e;
 }
 
@@ -461,18 +534,26 @@ namespace
 // to rvalues. The operands shall have type int. The
 // result of an equality expression is an rvalue of type
 // bool.
+//
+// TODO: Update the ordering operands for new types.
 Expr*
 check_ordering_expr(Elaborator& elab, Binary_expr* e)
 {
   // Apply conversions.
   Type const* z = get_integer_type();
+  Type const* b = get_boolean_type();
   Expr* c1 = require_converted(elab, e->first, z);
   Expr* c2 = require_converted(elab, e->second, z);
   if (!c1)
     throw Type_error({}, "left operand cannot be converted to 'int'");
   if (!c2)
     throw Type_error({}, "right operand cannot be converted to 'int'");
-  e->type(get_boolean_type());
+
+  // Rebuild the expression with the converted
+  // operands.
+  e->type_ = b;
+  e->first = c1;
+  e->second = c2;
   return e;
 }
 
@@ -518,13 +599,18 @@ check_binary_logical_expr(Elaborator& elab, Binary_expr* e)
 {
   // Apply conversions.
   Type const* b = get_boolean_type();
-  Expr const* c1 = require_converted(elab, e->first, b);
-  Expr const* c2 = require_converted(elab, e->second, b);
+  Expr* c1 = require_converted(elab, e->first, b);
+  Expr* c2 = require_converted(elab, e->second, b);
   if (!c1)
     throw Type_error({}, "left operand cannot be converted to 'bool'");
   if (!c2)
     throw Type_error({}, "right operand cannot be converted to 'bool'");
-  e->type(b);
+
+  // Rebuild the expression with the converted
+  // operands.
+  e->type_ = b;
+  e->first = c1;
+  e->second = c2;
   return e;
 }
 
@@ -534,10 +620,14 @@ Expr*
 check_unary_logical_expr(Elaborator& elab, Unary_expr* e)
 {
   Type const* b = get_boolean_type();
-  Expr const* c = require_converted(elab, e->first, b);
+  Expr* c = require_converted(elab, e->first, b);
   if (!c)
     throw Type_error({}, "operand cannot be converted to 'bool'");
-  e->type(b);
+
+  // Rebuild the expression with the converted
+  // operand.
+  e->type_ = b;
+  e->first = c;
   return e;
 }
 
@@ -565,52 +655,244 @@ Elaborator::elaborate(Not_expr* e)
 }
 
 
-// The target function operand is converted to
-// a value and shall have funtion type.
-Expr*
-Elaborator::elaborate(Call_expr* e)
+// Diagnose failures of argument conversion for
+// function calls.
+void
+Elaborator::on_call_error(Expr_seq const& conv,
+                          Expr_seq const& args,
+                          Type_seq const& parms)
 {
-  // Apply lvalue to rvalue conversion and ensure that
-  // the target has function type.
-  Expr* f = require_value(*this, e->first);
-  Type const* t1 = f->type();
-  if (!is<Function_type>(t1))
-    throw Type_error({}, "cannot call to non-function");
-  Function_type const* t = cast<Function_type>(t1);
-
-  // Check for basic function arity.
-  Type_seq const& parms = t->parameter_types();
-  Expr_seq& args = e->arguments();
   if (args.size() < parms.size())
     throw Type_error({}, "too few arguments");
   if (parms.size() < args.size())
     throw Type_error({}, "too many arguments");
 
-  // Check that each argument conforms to the the
-  // parameter.
   for (std::size_t i = 0; i < parms.size(); ++i) {
-    Type const* p = parms[i];
-    Expr* a = require_converted(*this, args[i], p);
-    if (!a) {
-      std::stringstream ss;
-      ss << "type mismatch in argument " << i + 1 << '\n';
-      throw Type_error({}, ss.str());
+    Expr const* c = conv[i];
+    if (!c) {
+      Expr const* a = args[i];
+      Type const* p = parms[i];
+      String s = format(
+        "type mismatch in argument {} (expected {} but got {})",
+        i + 1,
+        *a->type(),
+        *p);
+
+      // FIXME: Don't fail on the first error.
+      throw Type_error({}, s);
     }
   }
+}
 
-  // The type of the expression is that of the
-  // function return type.
-  e->type(t->return_type());
 
+namespace
+{
+
+// Returns a dot-expr if e is of the form x.ovl.
+// Otherwise, returns nullptr. 
+inline Dot_expr*
+as_method_overload(Dot_expr* e)
+{
+  if (is<Overload_expr>(e->member()))
+    return e;
+  return nullptr;
+}
+
+
+inline Dot_expr*
+as_method_overload(Expr* e)
+{
+  if (Dot_expr* dot = as<Dot_expr>(e))
+    return as_method_overload(dot);
+  return nullptr;
+}
+
+
+// Returns a dot-expr if e is of the form x.m or
+// x.ovl. Otherwise, returns nullptr.
+inline Dot_expr*
+as_method(Expr* e)
+{
+  if (Dot_expr* dot = as<Dot_expr>(e)) {
+    // x.y refers to a method.
+    if (Method_expr* m = as<Method_expr>(dot))
+      return m;
+
+    // x.y refers to a field.
+    if (is<Field_expr>(dot))
+      return nullptr;
+
+    // By elimination of cases, it must be a
+    // method overload.
+    lingo_assert(as_method_overload(dot));
+    return dot;
+  }
+  return nullptr;
+}
+
+
+} // namespace
+
+
+Expr*
+Elaborator::call(Function_decl* d, Expr_seq const& args)
+{
+  Function_type const* t = d->type();
+
+  // Perform argument conversion.
+  Type_seq const& parms = t->parameter_types();
+  Expr_seq conv = convert(args, parms);
+  if (std::any_of(conv.begin(), conv.end(), [](Expr const* p) { return !p; }))
+    return nullptr;
+
+  // Update the expression with the return type
+  // of the named function.
+  Expr* ref = new Decl_expr(t, d);
+  return new Call_expr(t->return_type(), ref, args);
+}
+
+
+Expr*
+Elaborator::resolve(Overload_expr* ovl, Expr_seq const& args)
+{
+  // Build a set of call expressions to the
+  // declarations in the overload set.
+  Expr_seq cands;
+  Overload& decls = ovl->declarations();
+  cands.reserve(decls.size());
+  for (Decl* d : decls) {
+    if (Expr* e = call(cast<Function_decl>(d), args))
+      cands.push_back(e);
+  }
+
+  // FIXME: If the call is to a method, then write 
+  // out the method format for the call. Same as below.
+  if (cands.empty()) {
+    Location loc = locate(ovl);
+    String msg = format("{}: no matching function for '{}'", loc, *ovl->name());
+    std::cerr << msg << '\n';
+    std::cerr << loc << ": candidates are:\n";
+    for (Decl* d : decls) {
+      std::cerr << format("{}: {}\n", locate(d), *d);
+    }
+    throw Type_error(locate(ovl), msg);
+  }
+
+  // TODO: Select the best candidate.
+  if (cands.size() > 1) {
+    String msg = format("call to function '{}' is ambiguous", *ovl->name());
+  }
+
+  return cands.front();
+}
+
+
+
+// Resolve a function call. The target of a function 
+// may be one of the following:
+//
+//    - a function f(args...)
+//    - a function overload set ovl(args...)
+//    - a method x.m(args...)
+//    - a method overload set x.ovl(args...)
+//
+// In the case where the target is a method or
+// member overload set of the form x.y(args...)
+// the containing object x is added to the front
+// of the argument list, and the funtion target
+// is simply the method or overlaod set. That is,
+// the following transformation is made:
+//
+//    x.y(args...) ~> y(x.args...)
+//
+// Let y be the new function target. 
+//
+// If the function target is an overload set, select
+// a function by overload resolution.
+//
+// TODO: If we support function objects by way of
+// overloading the call operator, then the target
+// could be an object or field of class type with
+// one or more member call operators.
+//
+// TODO: Would it be better to differentiate 
+// function and method call and have those dealt 
+// with separately on the back end(s)?
+//
+// TODO: Support the lookup of member funtions using
+// free-function notation:
+//
+//    f(x, args...) ~> x.f(args...)
+//
+// Applying this transformation might just entail
+// the creation of a fake expression and its elaboration
+// to resolve a method or overload set.
+Expr*
+Elaborator::elaborate(Call_expr* e)
+{
+  // Apply lvalue to rvalue conversion and ensure that
+  // the target (ultimately) has function type.
+  Expr* f = require_value(*this, e->target());
+  if (!is_callable(f))
+    throw Type_error({}, "object is not callable");
+
+  // Elaborate the arguments (in place) prior to 
+  // conversion. Do it now so we don't re-elaborate
+  // arguments during overload resolution.
+  Expr_seq& args = e->arguments();
+  for (Expr*& a : args)
+    a = elaborate(a);
+
+  // If the target is of the form x.m or x.ovl, insert x
+  // into the argument list and update the function target.
+  if (Dot_expr* dot = as_method(f)) {
+      // Build the "this" argument.
+      Expr* self = dot->container();
+      args.insert(args.begin(), self);
+
+      // Adjust the function target.
+      f = dot->member();
+  }
+
+  // Handle the case where f is an overload set.
+  if (Overload_expr* ovl = as<Overload_expr>(f)) {
+    return resolve(ovl, args);
+  } else {
+    // If it's not an overload set, it has function type.
+    Function_type const* t = cast<Function_type>(f->type());
+
+    // Perform argument conversion.
+    Type_seq const& parms = t->parameter_types();
+    Expr_seq conv = convert(args, parms);
+    if (std::any_of(conv.begin(), conv.end(), [](Expr const* p) { return !p; }))
+      on_call_error(conv, args, parms);
+
+    // Update the expression with the return type
+    // of the named function.
+    e->type_ = t->return_type();
+    e->first = f;
+  }
+
+  // Guarantee that f is an expression that refers
+  // to a declaration.
+  lingo_assert(is<Decl_expr>(f) &&
+               is<Function_decl>(cast<Decl_expr>(f)->declaration()));
+
+  // Update the call expression before returning.
   return e;
 }
 
 
 // TODO: Document the semantics of member access.
 Expr*
-Elaborator::elaborate(Member_expr* e)
+Elaborator::elaborate(Dot_expr* e)
 {
-  Expr* e1 = elaborate(e->scope());
+  Expr* e1 = elaborate(e->container());
+  if (!is<Reference_type>(e1->type())) {
+    std::stringstream ss;
+    ss << "cannot access a member of a non-object";
+    throw Type_error({}, ss.str());
+  }
 
   // Get the non-reference type of the outer
   // object so we can perform lookups.
@@ -621,53 +903,97 @@ Elaborator::elaborate(Member_expr* e)
     throw Type_error({}, ss.str());
   }
 
-  // Re-open the class scope so we can perform lookups
-  // in the usual way.
-  Record_decl* d = t->declaration();
-  Scope_sentinel scope(*this, d);
-  for (Decl* d1 : d->fields())
-    stack.top().bind(d1->name(), d1);
+  // We expect the member to be an unresolved id expression.
+  // If it isn't, there's not much we can do with it.
+  //
+  // TODO: Maybe allow a literal value in this position
+  // to support tuple access?
+  //
+  //    t.0 -- get the first tuple element?
+  Expr* e2 = e->member();
+  if (!is<Id_expr>(e2)) {
+    String msg = format("invalid member '{}'", *e2);
+    throw Type_error(locate(e2), msg);
+  }
+  Id_expr* id = cast<Id_expr>(e2);
 
-  // Elaborate the member expression.
-  Id_expr* e2 = as<Id_expr>(elaborate(e->member()));
-  if (!e2) {
-    std::stringstream ss;
-    ss << "invalid member reference";
-    throw Type_error({}, ss.str());
+  // Perform qualified lookup on the member.
+  Overload* ovl = qualified_lookup(t->scope(), id->symbol());
+  if (!ovl) {
+    String msg = format("no member matching '{}'", *id);
+    throw Lookup_error(locate(id), msg);
   }
 
-  // Find the offset in the class of the member.
-  // And stash it in the member expression.
-  for (std::size_t i = 0; i < d->fields().size(); ++i) {
-    if (e2->declaration() == d->fields()[i]) {
-      e->pos_ = i;
-      break;
+  // If we get a single declaration, return a corresponding
+  // expression.
+  if (ovl->size() == 1) {
+    Decl*d = ovl->front();
+    e2 = new Decl_expr(d->type(), d);
+    if (Field_decl* f = as<Field_decl>(d))
+      return new Field_expr(e1, e2, f);
+    if (Method_decl* m = as<Method_decl>(d)) {
+      return new Method_expr(e1, e2, m);
     }
-  }
-  assert(e->pos_ != -1);
+  } 
 
-  // Finally set the type of the expression.
-  e->type_ = e2->type();
+  // Otherwise, if the name resolves to a set of declarations, 
+  // then the declaration is still unresolved. Update the 
+  // expression with the overload set and defer until we find 
+  // a function call.
+  else {
+    e->first = e1;
+    e->second = new Overload_expr(ovl);
+    return e;
+  }
+
+  // Otherwise, this is an error.
+  std::stringstream ss;
+  ss << "invalid member reference";
+  throw Type_error({}, ss.str());
+}
+
+
+Expr*
+Elaborator::elaborate(Field_expr* e)
+{
   return e;
 }
 
 
-// TODO: Finalize the semantics of array access.
-//
-// In the expression e1[e2], e1 shall have array
-// type T[N] (for some N) or block type T[]. The
+Expr*
+Elaborator::elaborate(Method_expr* e)
+{
+  return e;
+}
+
+
+// In the expression e1[e2], e1 shall be an object of
+// array type T[N] (for some N) or block type T[]. The
 // expression e2 shall be an integer value. The result
 // type of the expressions is ref T.
+//
+// Note that e1 is not converted to a value, and in fact
+// *must* be a reference to an object. Converting to a
+// value will prevent me from creating element pointers
+// in code gen, because we need the base pointer from
+// which to compute offsets.
 Expr*
 Elaborator::elaborate(Index_expr* e)
 {
-  Expr* e1 = elaborate(e->array());
+  Expr* e1 = elaborate(e->first);
+  if (!is<Reference_type>(e1->type())) {
+    std::stringstream ss;
+    ss << "cannot index into a value";
+    throw Type_error({}, ss.str());
+  }
 
   // Get the non-reference type of the array.
   //
   // FIXME: Does this require a value transformation?
   // We don't (yet?) have array literals, so I generally
   // expect that this *must* be a reference to an array.
+  //
+  // TODO: Allow block type.
   Array_type const* t = as<Array_type>(e1->type()->nonref());
   if (!t) {
     std::stringstream ss;
@@ -676,10 +1002,12 @@ Elaborator::elaborate(Index_expr* e)
   }
 
   // The index shall be an integer value.
-  require_converted(*this, e->second, get_integer_type());
+  Expr* e2 = require_converted(*this, e->second, get_integer_type());
 
   // The result type shall be ref T.
   e->type_ = get_reference_type(t->type());
+  e->first = e1;
+  e->second = e2;
 
   return e;
 }
@@ -687,7 +1015,7 @@ Elaborator::elaborate(Index_expr* e)
 
 // NOTE: Conversions are created after their source
 // expressions  have been elaborated. No action is
-//required.
+// required.
 
 Expr*
 Elaborator::elaborate(Value_conv* e)
@@ -718,6 +1046,21 @@ Elaborator::elaborate(Copy_init* e)
   // Elaborate the type.
   e->type_ = elaborate(e->type_);
 
+  // If copying into a reference, we're actually
+  // performing reference initialization. Create
+  // a new node and elaborate it.
+  if (is<Reference_type>(e->type())) {
+    Reference_init* init = new Reference_init(e->type(), e->value());
+    return elaborate(init);
+  }
+
+  // Otherwise, this actually a copy.
+  //
+  // TOOD: This should perform a lookup to find a
+  // function that implements copies. It could be
+  // bitwise copy, a memberwise copy, or a copy
+  // constructor.
+
   // Convert the value to the resulting type.
   Expr* c = require_converted(*this, e->first, e->type_);
   if (!c) {
@@ -726,6 +1069,49 @@ Elaborator::elaborate(Copy_init* e)
        << *e->type() << " but got " << *e->value()->type() << ')';
     throw Type_error({}, ss.str());
   }
+  e->first = c;
+
+  return e;
+}
+
+
+// Note that this is only ever called from the
+// elaborator for copy initialization. The type must
+// already be elaborated.
+Expr*
+Elaborator::elaborate(Reference_init* e)
+{
+  Expr* obj = elaborate(e->object());
+
+  // A reference can only be bound to an object.
+  if (!is<Reference_type>(obj->type())) {
+    throw Type_error({}, "binding reference to temporary");
+  }
+
+  // TODO: Allow t2 to be derived from t1.
+  //
+  //    struct B { };
+  //    struct D : B { };
+  //
+  //    var obj : D;
+  //    var ref : B& = obj;
+  //
+  // TODO: Allow t2 to be less cv qualified than t1.
+  // That would allow bindings to constants:
+  //
+  //    var T x;
+  //    var T const& c = x;
+  Type const* t1 = e->type();
+  Type const* t2 = obj->type();
+  if (t1->nonref() != t2->nonref()) {
+    std::stringstream ss;
+    ss << "binding reference to an object of a different type"
+       << "(expected " << *t1 << " but got " << *t2 << ')';
+    throw Type_error({}, ss.str());
+  }
+
+  // Update the expression.
+  e->first = obj;
 
   return e;
 }
@@ -736,19 +1122,20 @@ Elaborator::elaborate(Copy_init* e)
 
 // Elaborate a declaration. This returns true if
 // elaboration succeeds and false otherwise.
-void
+Decl*
 Elaborator::elaborate(Decl* d)
 {
   struct Fn
   {
     Elaborator& elab;
 
-    void operator()(Variable_decl* d) const { return elab.elaborate(d); }
-    void operator()(Function_decl* d) const { return elab.elaborate(d); }
-    void operator()(Parameter_decl* d) const { return elab.elaborate(d); }
-    void operator()(Record_decl* d) const { return elab.elaborate(d); }
-    void operator()(Field_decl* d) const { return elab.elaborate(d); }
-    void operator()(Module_decl* d) const { return elab.elaborate(d); }
+    Decl* operator()(Variable_decl* d) const { return elab.elaborate(d); }
+    Decl* operator()(Function_decl* d) const { return elab.elaborate(d); }
+    Decl* operator()(Parameter_decl* d) const { return elab.elaborate(d); }
+    Decl* operator()(Record_decl* d) const { return elab.elaborate(d); }
+    Decl* operator()(Field_decl* d) const { return elab.elaborate(d); }
+    Decl* operator()(Method_decl* d) const { return elab.elaborate(d); }
+    Decl* operator()(Module_decl* d) const { return elab.elaborate(d); }
   };
 
   return apply(d, Fn{*this});
@@ -760,139 +1147,329 @@ Elaborator::elaborate(Decl* d)
 //
 // The variable is declared prior to the elaboration of its
 // initializer.
-void
+Decl*
 Elaborator::elaborate(Variable_decl* d)
 {
   d->type_ = elaborate(d->type_);
 
   // Declare the variable.
-  stack.declare(d);
+  declare(d);
 
   // Elaborate the initializer. Note that the initializers
   // type must be the same as that of the declaration.
-  elaborate(d->init());
+  d->init_ = elaborate(d->init());
 
   // Annotate the initializer with the declared
   // object.
   //
   // TODO: This will probably be an expression in
   // the future.
-  cast<Initializer>(d->init())->decl_ = d;
+  cast<Init>(d->init())->decl_ = d;
+
+  return d;
 }
 
 
 // The types of return expressions shall match the declared
 // return type of the function.
-void
+//
+// FIXME: Theres a lot of overlap with the elaboration
+// for methods. Merge that code.
+Decl*
 Elaborator::elaborate(Function_decl* d)
 {
   d->type_ = elaborate(d->type_);
 
   // Declare the function.
-  stack.declare(d);
+  declare(d);
 
   // Remember if we've seen a function named main().
   //
-  // FIXME: Compare symbols, not strings.
-  if (d->name()->spelling() == "main")
+  // FIXME: This seems dumb. Is there a better way
+  // of handling the discovery and elaboration of
+  // main?
+  if (d->name() == syms.get("main")) {
     main = d;
+
+    // Ensure that main has foreign linkage.
+    d->spec_ |= foreign_spec;
+
+    // TODO: Check argument tpypes 
+  }
 
   // Enter the function scope and declare all
   // of the parameters (by way of elaboration).
   //
-  // TODO: Handle failed parameter elaborations.
+  // Note that this modifies the origional parameters.
   Scope_sentinel scope(*this, d);
-  for (Decl* p : d->parameters())
-    elaborate(p);
+  for (Decl*& p : d->parms_)
+    p = elaborate(p);
 
-  // Check the body of the function.
-  elaborate(d->body());
+  // Check the body of the function, if present.
+  if (d->body())
+    d->body_ = elaborate(d->body());
+
+  // TODO: Are we actually checking returns match
+  // the return type?
 
   // TODO: Build a control flow graph and ensure that
   // every branch returns a value.
+  return d;
 }
 
 
 // Elaborate a parameter declaration. This simply declares
 // the parameter in the current scope.
-void
+Decl*
 Elaborator::elaborate(Parameter_decl* d)
 {
   d->type_ = elaborate(d->type_);
-  stack.declare(d);
+  declare(d);
+  return d;
 }
 
 
-void
+Decl*
 Elaborator::elaborate(Record_decl* d)
 {
-  stack.declare(d);
-  Scope_sentinel scope(*this, d);
-  for (Decl* d1 : d->fields())
-    elaborate(d1);
+  declare(d);
+
+  // Push the stack onto scope. Note that the record
+  // saves this information for later lookup. See
+  // the elaboration of dot expressions.
+  stack.push(d->scope());
+
+  // Elaborate fields and then method declarations.
+  //
+  // TODO: What are the lookup rules for default
+  // member initializers. If we do this:
+  //
+  //    struct S {
+  //      x : int = 1;
+  //      y : int = x + 2; // Probably ok
+  //      a : int = b - 1; // OK?
+  //      b : int = 0;
+  //      c : int = f();   // OK?
+  //      def f() -> int { ... }
+  //    }
+  //
+  // If we allow the 2nd, then we need to do two
+  // phase elaboration.
+  for (Decl*& f : d->fields_)
+    f = elaborate_decl(f);
+  for (Decl*& m : d->members_)
+    m = elaborate_decl(m);
+
+  // Elaborate member definitions. See comments
+  // above about handling member defintions.
+  for (Decl*& m : d->members_)
+    m = elaborate_def(m);
+
+  // Pop the stack off the scope.
+  stack.take();
+
+  return d;
 }
 
 
-void
+Decl*
 Elaborator::elaborate(Field_decl* d)
 {
-  d->type_ = elaborate(d->type_);
-  stack.declare(d);
+  lingo_unreachable();
+}
+
+
+Decl*
+Elaborator::elaborate(Method_decl* d)
+{
+  lingo_unreachable();
 }
 
 
 // Elaborate the module.  Returns true if successful and
 // false otherwise.
-void
+Decl*
 Elaborator::elaborate(Module_decl* m)
 {
   Scope_sentinel scope(*this, m);
-  for (Decl* d : m->declarations())
-    elaborate(d);
+  for (Decl*& d : m->decls_)
+    d = elaborate(d);
+  return m;
 }
 
+
+// -------------------------------------------------------------------------- //
+// Elaboration of declarations (but not definitions)
+
+namespace
+{
+
+// Defined here because of the member template.
+struct Elab_decl_fn
+{
+  Elaborator& elab;
+
+  template<typename T>
+  [[noreturn]] Decl* operator()(T*) const { lingo_unreachable(); }
+
+  // NOTE: Add overloads in order to support nested
+  // declarations. Note that supporting nested types
+  // would require its full elaboration.
+  Decl* operator()(Field_decl* d) const { return elab.elaborate_decl(d); }
+  Decl* operator()(Method_decl* d) const { return elab.elaborate_decl(d); }
+};
+
+
+} // namespace
+
+Decl*
+Elaborator::elaborate_decl(Decl* d)
+{
+  return apply(d, Elab_decl_fn{*this});
+}
+
+
+Decl*
+Elaborator::elaborate_decl(Field_decl* d)
+{
+  d->type_ = elaborate(d->type_);
+  declare(d);
+  return d;
+}
+
+
+Decl*
+Elaborator::elaborate_decl(Method_decl* d)
+{
+  // Generate the type of the implicit this parameter.
+  //
+  // TODO: Handle constant references.
+  Record_decl* rec = stack.record();
+  Type const* type = get_reference_type(get_record_type(rec));
+
+  // Re-build the function type.
+  Function_type const* ft = cast<Function_type>(elaborate(d->type()));
+  Type_seq pt = ft->parameter_types();
+  pt.insert(pt.begin(), type);
+  Type const* rt = ft->return_type();
+  Type const* mt = get_function_type(pt, rt);
+  d->type_ = mt;
+
+  // Actually build the implicit this parameter and add it
+  // to the front of the list of parameters.
+  Symbol const* name = syms.get("this");
+  Parameter_decl* self = new Parameter_decl(name, type);
+  d->parms_.insert(d->parms_.begin(), self);
+
+  // Note that we don't need to elaborate or declare
+  // the funciton parameters because they're only visible
+  // within the function body.
+
+  // Now declare the method.
+  declare(d);
+  return d;
+}
+
+
+// -------------------------------------------------------------------------- //
+// Elaboration of definitions
+
+namespace
+{
+
+// Defined here because of the member template.
+struct Elab_def_fn
+{
+  Elaborator& elab;
+
+  template<typename T>
+  [[noreturn]] Decl* operator()(T*) const { lingo_unreachable(); }
+
+  Decl* operator()(Field_decl* d) const { return elab.elaborate_def(d); }
+  Decl* operator()(Method_decl* d) const { return elab.elaborate_def(d); }
+};
+
+
+} // namespace
+
+
+Decl*
+Elaborator::elaborate_def(Decl* d)
+{
+  return apply(d, Elab_def_fn{*this});
+}
+
+
+// Nothing to do here now...
+Decl*
+Elaborator::elaborate_def(Field_decl* d)
+{
+  return d;
+}
+
+
+Decl*
+Elaborator::elaborate_def(Method_decl* d)
+{
+  // Elaborate and declare parameters.
+  Scope_sentinel scope(*this, d);
+  for (Decl*& p : d->parms_)
+    p = elaborate(p);
+
+  // Check the body of the method. It must be defined.
+  d->body_ = elaborate(d->body());
+
+  // TODO: Are we actually checking returns match
+  // the return type?
+
+  // TODO: Build a control flow graph and ensure that
+  // every branch returns a value.
+  return d;
+}
 
 // -------------------------------------------------------------------------- //
 // Elaboration of statements
 
 // Elaborate a statement. This returns true if elaboration
 // succeeds and false otherwise.
-void
+Stmt*
 Elaborator::elaborate(Stmt* s)
 {
   struct Fn
   {
     Elaborator& elab;
 
-    void operator()(Empty_stmt* d) const { elab.elaborate(d); }
-    void operator()(Block_stmt* d) const { elab.elaborate(d); }
-    void operator()(Assign_stmt* d) const { elab.elaborate(d); }
-    void operator()(Return_stmt* d) const { elab.elaborate(d); }
-    void operator()(If_then_stmt* d) const { elab.elaborate(d); }
-    void operator()(If_else_stmt* d) const { elab.elaborate(d); }
-    void operator()(While_stmt* d) const { elab.elaborate(d); }
-    void operator()(Break_stmt* d) const { elab.elaborate(d); }
-    void operator()(Continue_stmt* d) const { elab.elaborate(d); }
-    void operator()(Expression_stmt* d) const { elab.elaborate(d); }
-    void operator()(Declaration_stmt* d) const { elab.elaborate(d); }
+    Stmt* operator()(Empty_stmt* d) const { return elab.elaborate(d); }
+    Stmt* operator()(Block_stmt* d) const { return elab.elaborate(d); }
+    Stmt* operator()(Assign_stmt* d) const { return elab.elaborate(d); }
+    Stmt* operator()(Return_stmt* d) const { return elab.elaborate(d); }
+    Stmt* operator()(If_then_stmt* d) const { return elab.elaborate(d); }
+    Stmt* operator()(If_else_stmt* d) const { return elab.elaborate(d); }
+    Stmt* operator()(While_stmt* d) const { return elab.elaborate(d); }
+    Stmt* operator()(Break_stmt* d) const { return elab.elaborate(d); }
+    Stmt* operator()(Continue_stmt* d) const { return elab.elaborate(d); }
+    Stmt* operator()(Expression_stmt* d) const { return elab.elaborate(d); }
+    Stmt* operator()(Declaration_stmt* d) const { return elab.elaborate(d); }
   };
 
   return apply(s, Fn{*this});
 }
 
 
-void
-Elaborator::elaborate(Empty_stmt*)
+Stmt*
+Elaborator::elaborate(Empty_stmt* s)
 {
+  return s;
 }
 
 
-void
+Stmt*
 Elaborator::elaborate(Block_stmt* s)
 {
   Scope_sentinel scope = *this;
-  for (Stmt* s1 : s->statements())
-    elaborate(s1);
+  for (Stmt*& s1 : s->first)
+    s1 = elaborate(s1);
+  return s;
 }
 
 
@@ -902,7 +1479,7 @@ Elaborator::elaborate(Block_stmt* s)
 //
 // TODO: If we have const types, then we'd have to add this
 // checking.
-void
+Stmt*
 Elaborator::elaborate(Assign_stmt* s)
 {
   // FIXME: Write a better predicate?
@@ -920,6 +1497,10 @@ Elaborator::elaborate(Assign_stmt* s)
   Type const* t2 = rhs->type();
   if (t1 != t2)
     throw Type_error({}, "assignment to an object of a different type");
+
+  s->first = lhs;
+  s->second = rhs;
+  return s;
 }
 
 
@@ -927,77 +1508,102 @@ Elaborator::elaborate(Assign_stmt* s)
 // return type of the enclosing function.
 //
 // TODO: Implement me.
-void
+Stmt*
 Elaborator::elaborate(Return_stmt* s)
 {
   Function_decl* fn = stack.function();
   Type const* t = fn->return_type();
 
   // Check that the return type matches the returned value.
-  Expr* c = require_converted(*this, s->first, t);
-  if (!c)
-    throw std::runtime_error("return type mismatch");
+  Expr* e = elaborate(s->value());
+  Expr* c = convert(e, t);
+  if (!c) {
+    std::stringstream ss;
+    ss << "return type mismatch (expected "
+       << *t << " but got " << *s->value()->type() << ")";
+    throw std::runtime_error(ss.str());
+  }
+
+  s->first = c;
+  return s;
 }
 
 
 // The condition must must be a boolean expression.
-void
+Stmt*
 Elaborator::elaborate(If_then_stmt* s)
 {
   Expr* c = require_converted(*this, s->first, get_boolean_type());
   if (!c)
     throw Type_error({}, "if condition does not have type 'bool'");
-  elaborate(s->body());
+  Stmt* b = elaborate(s->body());
+
+  s->first = c;
+  s->second = b;
+  return s;
 }
 
 
 // The condition must must be a boolean expression.
-void
+Stmt*
 Elaborator::elaborate(If_else_stmt* s)
 {
   Expr* c = require_converted(*this, s->first, get_boolean_type());
   if (!c)
     throw Type_error({}, "if condition does not have type 'bool'");
-  elaborate(s->true_branch());
-  elaborate(s->false_branch());
+  Stmt* t = elaborate(s->true_branch());
+  Stmt* f = elaborate(s->false_branch());
+
+  s->first = c;
+  s->second = t;
+  s->third = f;
+  return s;
 }
 
 
-void
+Stmt*
 Elaborator::elaborate(While_stmt* s)
 {
   Expr* c = require_converted(*this, s->first, get_boolean_type());
   if (!c)
     throw Type_error({}, "loop condition does not have type 'bool'");
-  elaborate(s->body());
+  Stmt* b = elaborate(s->body());
+
+  s->first = c;
+  s->second = b;
+  return s;
 }
 
 
-void
+Stmt*
 Elaborator::elaborate(Break_stmt* s)
 {
   // TODO: Verify that a break occurs within an
   // appropriate context.
+  return s;
 }
 
 
-void
+Stmt*
 Elaborator::elaborate(Continue_stmt* s)
 {
   // TODO: Verify that a continue occurs within an
   // appropriate context.
+  return s;
 }
 
 
-void
+Stmt*
 Elaborator::elaborate(Expression_stmt* s)
 {
-  elaborate(s->expression());
+  s->first = elaborate(s->expression());
+  return s;
 }
 
 
-void
+Stmt*
 Elaborator::elaborate(Declaration_stmt* s)
 {
-  elaborate(s->declaration());
+  s->first = elaborate(s->declaration());
+  return s;
 }
