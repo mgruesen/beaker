@@ -615,8 +615,34 @@ Generator::gen(Return_stmt const* s)
 void
 Generator::gen(If_then_stmt const* s)
 {
+  // Get conditional value.
   llvm::Value* condit = gen(s->condition());
+  // Create a boolean from it.
+  condit = build.CreateFCmpONE(condit, 
+    ConstantFP::get(getGlobalContext(), APFloat(0.0)), "condit");
+
+  // Get current func obj.
+  llvm::Function* func = build.GetInsertBlock()->getParent();
   
+  // Create then block.
+  llvm::BasicBlock* then_blk = BasicBlock::Create(getGlobalContext(), "then", func);
+  // Create continue block (target for false and end of then).
+  llvm::BasicBlock* cont_blk = BasicBlock::Create(getGlobalContext(), "cont");
+  
+  // Create the conditonal branch with the targets.
+  build.CreateCondBr(condit, then_blk, cont_blk);
+  
+  // Output 'then' block.
+  build.SetInsertPoint(then_blk);
+  // Generate the 'then' block.
+  llvm::Value* body = gen(s->body());
+  // Branch to continue block.
+  build.CreateBr(cont_blk);
+
+  func->getBasicBlockList().push_back(cont_blk);
+  // Output 'continue' block.
+  build.SetInsertPoint(cont_blk);
+  gen(new Empty_stmt());
 }
 
 
