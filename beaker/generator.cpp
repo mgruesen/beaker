@@ -638,11 +638,17 @@ Generator::gen(If_then_stmt const* s)
   llvm::Value* body = gen(s->body());
   // Branch to continue block.
   build.CreateBr(cont_blk);
+  // Get the updated 'then' block.
+  then_blk = build.GetInsertBlock();
 
+  // Add the block.
   func->getBasicBlockList().push_back(cont_blk);
+
   // Output 'continue' block.
   build.SetInsertPoint(cont_blk);
-  gen(new Empty_stmt());
+  // Generate the 'cont' block.
+  llvm::Value* cont = gen(new Empty_stmt());
+
 }
 
 
